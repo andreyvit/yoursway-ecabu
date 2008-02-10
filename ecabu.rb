@@ -1,6 +1,9 @@
 require 'rubygems'
+require 'tempfile'
+require 'find'
 require 'optparse'
 require 'optparse/time'
+require 'fileutils'
 require 'ostruct'
 require 'set'
 require 'zip/zipfilesystem' # from rubyzip gem
@@ -9,6 +12,7 @@ require 'pp'
 MANIFEST_PATH='META-INF/MANIFEST.MF'
 PLUGINXML_PATH='plugin.xml'
 FRAGMENTXML_PATH='fragment.xml'
+BUILD_PROPS='build.properties'
 
 class Source
   
@@ -23,6 +27,8 @@ protected
 end
 
 class BinaryFolderSource < Source
+
+  attr_accessor :binary_operation
   
   def initialize(path)
     super()
@@ -71,6 +77,10 @@ class SourceFolderSource < Source
     "source plugins folder #{@path}"
   end
   
+  def binary_operation
+    :nop
+  end
+  
   def find_bundles(requestor)
     dir = @path
     Dir.foreach(dir) do |name|
@@ -112,21 +122,76 @@ class SourceRule < Rule
   
 end
 
+class ExcludePatternRule < Rule
+  
+  def initialize(pattern)
+    @pattern = pattern
+  end
+  
+  def to_s
+    "exclude plugins matching #{@pattern}"
+  end
+  
+  def select_plugins(selected_plugins, lookup)
+    return selected_plugins.select { |p| !File.fnmatch(@pattern, p.name) }
+  end
+  
+end
+
+class IncludePatternRule < Rule
+  
+  def initialize(pattern)
+    @pattern = pattern
+  end
+  
+  def to_s
+    "include all plugins matching #{@pattern}"
+  end
+  
+  def select_plugins(selected_plugins, lookup)
+    s = selected_plugins 
+    lookup.all_bundles.select { |p| File.fnmatch(@pattern, p.name) }.each { |p| 
+      s << p unless s.include?(p)
+    }
+    return s
+  end
+  
+end
+
+class IncludeOnlyPatternRule < Rule
+  
+  def initialize(pattern)
+    @pattern = pattern
+  end
+  
+  def to_s
+    "exclude plugins NOT matching #{@pattern}"
+  end
+  
+  def select_plugins(selected_plugins, lookup)
+    return selected_plugins.select { |p| File.fnmatch(@pattern, p.name) }
+  end
+  
+end
+
 class Options
   
   attr_accessor :sources
   attr_accessor :rules
   attr_accessor :debug
+  attr_accessor :output_folder
   
   def initialize
     @sources = []
     @rules = []
     @debug = {}
+    @output_folder = nil
   end
 
   def self.parse(args)
     options = self.new
     include_following = false
+    binary_operation = :nop
 
     opts = OptionParser.new do |opts|
       opts.banner = "Usage: ecabu.rb [options]"
@@ -137,6 +202,7 @@ class Options
       opts.on("-B", "--binary FOLDER",
               "Add a binary plugins FOLDER to the sources") do |folder|
         s = BinaryFolderSource.new(folder)
+        s.binary_operation = binary_operation
         options.sources << s
         options.rules << SourceRule.new(s) if include_following
       end
@@ -148,9 +214,36 @@ class Options
         options.rules << SourceRule.new(s) if include_following
       end
 
+      opts.on("-O", "--output FOLDER",
+              "Put the built binaries into FOLDER") do |folder|
+        options.output_folder = folder
+      end
+
+      opts.on("-i", "--include PATTERN",
+              "Include all plugins matching shell glob PATTERN") do |v|
+        options.rules << IncludePatternRule.new(v)
+      end
+
+      opts.on("-x", "--exclude PATTERN",
+              "Exclude currently included plugins matching shell glob PATTERN") do |v|
+        options.rules << ExcludePatternRule.new(v)
+      end
+
+      opts.on("-y", "--include-only PATTERN",
+              "Exclude currently included plugins NOT matching shell glob PATTERN") do |v|
+        options.rules << IncludeOnlyPatternRule.new(v)
+      end
+
       opts.on("-I", "--[no-]include-following",
               "Include all plugins from the following sources into the build") do |v|
-        include_following= v
+        include_following = v
+      end
+
+      binops = [:nop, :copy]
+      opts.on("--binary-op OPERATION", binops.join(','),
+              "Operation to perform on the binary plugins found in the following sources",
+              "  (one of #{binops.join(',')})") do |v|
+        binary_operation = v
       end
 
       opts.on("--debug x,y,z", Array, "Set options") do |list|
@@ -244,7 +337,7 @@ class Manifest
         end
         next if ignored.include?(last_header)
         headers[last_header] += $'.chomp
-      elsif line =~ /([\w\d_-]+)\s*:/
+      elsif line =~ /^([\w\d_-]+)\s*:/
         last_header = $1
         next if ignored.include?(last_header)
         unless headers[last_header].nil?
@@ -272,6 +365,7 @@ private
         puts "#{file_name_for_errors}: unparsable directive in #{name_for_errors}: \"#{pair}\""
         next
       end
+      directives[key] = value
     end
     ValueWithDirectives.new(item_value, directives)
   end
@@ -282,15 +376,52 @@ private
   
 end
 
+class JavaProperties
+  
+  def self.parse(data, file_name_for_errors)
+    headers = {}
+    last_header = nil
+    lineno = 0
+    cont = false
+    data.each_line do |line|
+      lineno += 1
+      if cont
+        v = line.strip
+        cont = v[-1] == ?\\
+        v = (v[0,v.length-1] || '') if cont
+        headers[last_header] += v
+      elsif line =~ /^\s*$/
+        next
+      elsif line =~ /^\s*#/
+        next
+      elsif line =~ /^\s*([^\s=]+)\s*=/
+        last_header = $1
+        v = $'.strip
+        cont = v[-1] == ?\\
+        v = (v[0,v.length-1] || '') if cont
+        headers[last_header] = v
+      else
+        puts "#{file_name_for_errors}(#{lineno}): unrecognized line \"#{line}\""
+      end
+    end   
+    headers
+  end
+  
+end
+
 class Bundle
   
   attr_reader :name, :source
-  attr_reader :required_bundles
+  # available after parsing
+  attr_reader :required_bundles, :fragment_host
+  # available after build
+  attr_reader :exported_classpath
   
   def initialize(source, name)
     @source = source
     @name = name
     @parsed = false
+    @exported_classpath = []
   end
   
   def parsed?
@@ -299,6 +430,14 @@ class Bundle
   
   def to_s
     "#{@name} in #{@source}"
+  end
+  
+  def contribute_to_plan(plan, lookup)
+    return if plan.include?(self)
+    @required_bundles.each { |b| b.contribute_to_plan(plan, lookup) }
+    @fragments = lookup.fragments(self)
+    @fragments.each { |b| b.contribute_to_plan(plan, lookup) }
+    plan.add(self)
   end
   
 protected
@@ -311,13 +450,47 @@ protected
     plugin_xml = File.join(path_prefix, PLUGINXML_PATH)
     plugin_xml = File.join(path_prefix, FRAGMENTXML_PATH)
     @required_bundles = []
+    @reexported_requires = []
+    @bundle_classpath = []
+    @extensible_api = false
     if file_obj.file?(manifest_mf)
       data = file_obj.open(manifest_mf, "r") { |f| f.read }
       mf = Manifest.parse(data, path_prefix_for_errors + MANIFEST_PATH)
       mf.values_with_directives('Require-Bundle').each do |vd|
-        puts vd if vd.value == 'reexport'
         b = lookup.lookup(vd.value, self)
         @required_bundles << b unless b.nil?
+        @reexported_requires << b if vd.directives['visibility'] == 'reexport'
+      end
+      mf.values_with_directives('Bundle-ClassPath').each do |vd|
+        @bundle_classpath << vd.value
+      end
+      @extensible_api = true if mf.value('Eclipse-ExtensibleAPI', 'false') == 'true'
+      @fragment_host = mf.value('Fragment-Host', nil)
+    end
+  end
+  
+  def resolve_bundle_classpath(rootdir, classdir = nil)
+    result = []
+    (if @bundle_classpath.empty? then ['.'] else @bundle_classpath end).each do |entry|
+      entry.strip!
+      if entry == '.'
+        result << classdir unless classdir.nil?
+      else
+        result << File.join(rootdir, entry)
+      end
+    end
+    result
+  end
+  
+  def post_build
+    @reexported_requires.each do |bundle|
+      @exported_classpath += bundle.exported_classpath
+      puts "Bundle #{self.name} reexports #{bundle.exported_classpath.size} classpath entries from #{bundle.name}."
+    end
+    if @extensible_api
+      @fragments.each do |bundle|
+        @exported_classpath += bundle.exported_classpath
+        puts "Bundle #{self.name} reexports #{bundle.exported_classpath.size} classpath entries from fragments #{bundle.name}."
       end
     end
   end
@@ -335,6 +508,22 @@ class DirectoryBundle < Bundle
     self.do_parse(File, @path, "#{@path}/", lookup)
   end
   
+  def perform_build(build_state)
+    case @source.binary_operation
+    when :nop
+      bin_path = @path
+    when :copy
+      puts "Copying unpacked binary plugin #{self.name}."
+      FileUtils.cp_r(@path, build_state.output_folder)
+      bin_path = File.join(build_state.output_folder, File.basename(@path))
+    else
+      puts "Unrecognized build mode #{@source.binary_operation} for #{self}."
+      exit
+    end
+    @exported_classpath += resolve_bundle_classpath(bin_path, bin_path)
+    self.post_build
+  end
+  
 end
 
 class FileBundle < Bundle
@@ -350,6 +539,42 @@ class FileBundle < Bundle
     end
   end
   
+  def perform_build(build_state)
+    case @source.binary_operation
+    when :nop
+      bin_path = @path
+    when :copy
+      puts "Copying packed binary plugin #{self.name}."
+      FileUtils.cp_r(@path, build_state.output_folder)
+      bin_path = File.join(build_state.output_folder, File.basename(@path))
+    else
+      puts "Unrecognized build mode #{@source.binary_operation} for #{self}."
+      exit
+    end
+    @exported_classpath << bin_path
+    self.post_build
+  end
+  
+end
+
+def javac(*args)
+  puts "Running javac..."
+  
+  f = Tempfile.new('javacargs')
+  args.each { |a| f.puts "\"#{a}\"" }
+  f.close
+  
+  pid = Process.fork do
+    exec('javac', '@' + f.path)
+    Process.exit!(255)
+  end
+  pid, status = Process.wait2(pid)
+  FileUtils.cp(f.path, '/tmp/javacargs')
+  f.unlink
+  if status.exitstatus != 0
+    puts "Compilation failed! See /tmp/javacargs"
+    exit
+  end  
 end
 
 class DirectorySourceBundle < Bundle
@@ -363,6 +588,64 @@ class DirectorySourceBundle < Bundle
     self.do_parse(File, @path, "#{@path}/", lookup)
   end
   
+  def perform_build(build_state)
+    puts "Building #{self.name}."
+    outpath = File.join(build_state.output_folder, self.name)
+    FileUtils.mkdir_p(outpath)
+    
+    build_props = File.join(@path, BUILD_PROPS)
+    unless File.file?(build_props)
+      puts "#{@path}: no #{BUILD_PROPS} found, don't know what to build."
+      exit
+    end
+    data = File.open(build_props, "r") { |f| f.read }
+    props = JavaProperties.parse(data, build_props)
+    
+    src_folders = []
+    props.each { |k, v| src_folders += v.split(',').collect { |s| s.strip }.select { |s| s.length > 0 } if k =~ /^source\./ }
+    classes_dir = nil
+    unless src_folders.empty?
+      sources = []
+      src_folders.each do |src_folder|
+        Find.find(File.join(@path, src_folder)) do |path|
+          if FileTest.directory?(path)
+            if File.basename(path)[0] == ?.
+              Find.prune
+            end
+          elsif path =~ /\.java$/
+            sources << path
+          end
+        end
+      end
+    
+      class_path = []
+      @required_bundles.each { |b| class_path += b.exported_classpath }
+      class_path += resolve_bundle_classpath(@path, nil)
+      
+      Dir.chdir(@path)
+      javac('-nowarn', '-d', outpath, '-cp', class_path.join(':'), *sources)
+      
+      classes_dir = outpath if src_folders.size > 0
+    end
+
+    bin_includes = (props['bin.includes'] || '').split(',').collect { |s| s.strip }.select { |s| s.length > 0 }
+    bin_includes.each do |bi|
+      next if bi == '.' # don't know what it means, but used by DLTK and obviously should be ignored
+      bi = bi[0,-2] if bi[-1] == '/'
+      src = File.join(@path, bi)
+      unless File.exists?(src)
+        puts "#{self.name}: bin.includes entry not found: #{bi}"
+        next
+      end
+      src = File.join(src, '.') if File.directory?(src)
+      dst = File.join(outpath, bi)
+      FileUtils.cp_r(src, dst)
+    end
+    
+    @exported_classpath += resolve_bundle_classpath(outpath, classes_dir)
+    self.post_build
+  end
+  
 end
 
 class BundleLookup
@@ -372,6 +655,7 @@ class BundleLookup
   def initialize
     @names_to_bundles = {}
     @unresolved = []
+    @fragments = {}
   end
   
   def add_bundle(bundle)
@@ -386,6 +670,37 @@ class BundleLookup
     b = @names_to_bundles[name]
     @unresolved << [name, src_bundle] if b.nil?
     return b
+  end
+  
+  def all_bundles
+    @names_to_bundles.values
+  end
+  
+  def fragments(bundle)
+    @fragments[bundle] || []
+  end
+  
+  def index_fragments!
+    all_bundles.each do |bundle|
+      next unless bundle.parsed?
+      host = bundle.fragment_host
+      next if host.nil?
+      host = lookup(host, bundle)
+      next if host.nil?
+      (@fragments[host] ||= []) << bundle
+    end
+  end
+  
+end
+
+class BuildState
+  
+  attr_reader :output_folder
+  attr_reader :bundles_to_binaries
+  
+  def initialize(output_folder)
+    @output_folder = output_folder
+    @bundles_to_binaries = {}
   end
   
 end
@@ -408,6 +723,32 @@ class String
   end
 end
 
+class BuildPlan
+  
+  def initialize
+    @order = []
+    @items = Set.new
+  end
+  
+  def add(bundle)
+    @order << bundle
+    @items << bundle
+  end
+  
+  def include?(bundle)
+    @items.include?(bundle)
+  end
+  
+  def size
+    @order.size
+  end
+
+  def each(&block)
+    @order.each(&block)
+  end
+  
+end
+
 class Builder
   
   attr_accessor :log
@@ -417,6 +758,7 @@ class Builder
   def initialize(options)
     @sources = options.sources
     @rules = options.rules
+    @options = options
   end
   
   def show_options_summary
@@ -459,6 +801,23 @@ class Builder
     end
   end
   
+  def create_plan
+    @lookup.index_fragments!
+    plan = BuildPlan.new
+    @selected_plugins.each do |bundle|
+      bundle.contribute_to_plan(plan, lookup)
+    end
+    plan
+  end
+  
+  def perform_build(plan)
+    build_state = BuildState.new(@options.output_folder)
+    FileUtils.mkdir_p(build_state.output_folder)
+    plan.each do |bundle|
+      bundle.perform_build(build_state)
+    end
+  end
+  
   def unresolved_bundles
     @lookup.unresolved
   end
@@ -480,6 +839,11 @@ private
 end
 
 options = Options.parse(ARGV)
+if options.output_folder.nil?
+  puts "No output folder specified. See --output. Stop."
+  exit
+end
+
 builder = Builder.new(options)
 builder.log = $stdout
 builder.show_options_summary
@@ -501,5 +865,9 @@ unless unres.size == 0
   puts "Stop."
   exit
 end
+
+plan = builder.create_plan
+puts "Build plan contains #{plan.size} items."
+builder.perform_build(plan)
 
 puts "Done."
