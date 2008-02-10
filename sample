@@ -1,0 +1,2 @@
+#! /bin/sh
+ruby ecabu.rb --binary /Applications/Eclipse\ 3.3.app/Contents/Resources/Java/plugins --source ~/Projects/YourSway/dltk-yoursway/core/plugins --source ~/Projects/EskoArtwork/antlr --include-following --source ~/Projects/EskoArtwork/esko
