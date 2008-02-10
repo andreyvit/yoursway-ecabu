@@ -4,9 +4,11 @@ require 'find'
 require 'optparse'
 require 'optparse/time'
 require 'fileutils'
+require 'pathname'
 require 'ostruct'
 require 'set'
 require 'zip/zipfilesystem' # from rubyzip gem
+require 'zip/zip'           # from rubyzip gem
 require 'pp'
 
 MANIFEST_PATH='META-INF/MANIFEST.MF'
@@ -444,6 +446,10 @@ class Bundle
     plan.add(self)
   end
   
+  def can_be_jarred?
+    @bundle_classpath.all? { |e| e == '.' }
+  end
+  
 protected
   
   def do_parse(file_obj, path_prefix, path_prefix_for_errors, lookup)
@@ -646,7 +652,28 @@ class DirectorySourceBundle < Bundle
       FileUtils.cp_r(src, dst)
     end
     
-    @exported_classpath += resolve_bundle_classpath(outpath, classes_dir)
+    if can_be_jarred?
+      @jar_name = File.join(build_state.output_folder, self.name + ".jar")
+      puts "Compressing into #{File.basename(@jar_name)}"
+      Zip::ZipOutputStream.open(@jar_name) do |zip|
+        outpn = Pathname.new(outpath)
+        Find.find(outpath) do |path|
+          if FileTest.directory?(path)
+            if File.basename(path)[0] == ?.
+              Find.prune
+            end
+          else
+            pn = Pathname.new(path).relative_path_from(outpn).to_s
+            zip.put_next_entry(pn)
+            zip << File.open(path, 'rb') { |f| f.read }
+          end
+        end
+      end
+      @exported_classpath << @jar_name if src_folders.size > 0
+      FileUtils.rm_rf(outpath)
+    else
+      @exported_classpath += resolve_bundle_classpath(outpath, classes_dir)
+    end
     self.post_build
   end
   
