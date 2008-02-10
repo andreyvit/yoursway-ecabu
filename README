@@ -1,0 +1,54 @@
+
+ecabu — the lightweight Eclipse plugins builder
+===============================================
+
+Does handle:
+- multiple source and binary sources
+- fragments (but see below)
+- version numbering and qualifier substitution
+
+Does not handle:
+- features
+- checking out the sources from a VCS
+
+The author can be reached at andreyvit@gmail.com.
+This software is assumed to be under a BSD license.
+
+
+Installing ecabu
+----------------
+
+1. Git-clone (or download and extract) to where you want ecabu to *live*
+(i.e. not to a temporary location).
+
+2. Run "sudo ./install /usr/local/bin" to put ecabu shell script into the
+specified folder. (The shell script will have a hard-coded path to ecabu.rb,
+which should be in the same folder as the installer script.)
+
+
+Using ecabu
+-----------
+
+A sample invokation is provided, see the "sample" shell script. Basically,
+you need to specify some sources (where ecabu should look for plugins), and
+then what plugins you want to include into the build (you can automatically
+include some of the sources, or you can include/exclude using shell glob
+patterns).
+
+You also must specify the output directory.
+
+
+Handling fragments
+------------------
+
+Note that ecabu does not parse all the plugins in the source directories
+(this would take more time), so it will only include those fragments it will
+encounter. Unless someone references a fragment in Require-Bundle (is this
+possible?), the only fragments that will be encountered are the fragments
+you've explicitly included into the build.
+
+This means that most Eclipse applications will need to explicitly include SWT
+fragment using "--include 'org.eclipse.swt.*'" -- unless, of course, you
+include the entire platform (using "--include-following" before specifying
+"--binary <path-to-platform-plugins>").
+
