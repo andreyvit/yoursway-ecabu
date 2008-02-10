@@ -14,6 +14,8 @@ PLUGINXML_PATH='plugin.xml'
 FRAGMENTXML_PATH='fragment.xml'
 BUILD_PROPS='build.properties'
 
+ECABU_VERSION="1"
+
 class Source
   
   attr_reader :bundles
@@ -197,7 +199,7 @@ class Options
       opts.banner = "Usage: ecabu.rb [options]"
 
       opts.separator ""
-      opts.separator "Specific options:"
+      opts.separator "Specifying sources:"
 
       opts.on("-B", "--binary FOLDER",
               "Add a binary plugins FOLDER to the sources") do |folder|
@@ -214,10 +216,8 @@ class Options
         options.rules << SourceRule.new(s) if include_following
       end
 
-      opts.on("-O", "--output FOLDER",
-              "Put the built binaries into FOLDER") do |folder|
-        options.output_folder = folder
-      end
+      opts.separator ""
+      opts.separator "Specifying plugins to build:"
 
       opts.on("-i", "--include PATTERN",
               "Include all plugins matching shell glob PATTERN") do |v|
@@ -239,23 +239,27 @@ class Options
         include_following = v
       end
 
+      opts.separator ""
+      opts.separator "Other options:"
+
+      opts.on("-O", "--output FOLDER",
+              "Put the built binaries into FOLDER") do |folder|
+        options.output_folder = folder
+      end
+
       binops = [:nop, :copy]
-      opts.on("--binary-op OPERATION", binops.join(','),
+      opts.on("--binary-op OPERATION", binops,
               "Operation to perform on the binary plugins found in the following sources",
-              "  (one of #{binops.join(',')})") do |v|
+              "  (one of #{binops.join(', ')})") do |v|
         binary_operation = v
-      end
-
-      opts.on("--debug x,y,z", Array, "Set options") do |list|
-        list.each { |o| options.debug[o.intern] = true }
-      end
-
-      opts.on("-v", "--[no-]verbose", "Run verbosely") do |v|
-        options.verbose = v
       end
 
       opts.separator ""
       opts.separator "Common options:"
+
+      opts.on("--debug x,y,z", Array, "Set debug options") do |list|
+        list.each { |o| options.debug[o.intern] = true }
+      end
 
       # No argument, shows at tail.  This will print an options summary.
       # Try it and see!
@@ -266,7 +270,7 @@ class Options
 
       # Another typical switch to print the version.
       opts.on_tail("--version", "Show version") do
-        puts OptionParser::Version.join('.')
+        puts ECABU_VERSION
         exit
       end
     end
