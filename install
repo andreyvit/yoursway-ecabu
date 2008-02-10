@@ -1,0 +1,12 @@
+#! /bin/bash
+test -n "$1" || {
+  echo "Please specify the destination folder. (E.g. $(basename "$0") /usr/local/bin.)"
+  exit 2
+}
+pushd "$(dirname "$0")" >/dev/null
+dir="$(pwd)"
+popd >/dev/null
+ecabu="$dir/ecabu.rb"
+dest="$1/ecabu"
+cp -f "$dir/ecabu" "$dest"
+perl -i -pe "\$_ = \"ECABU=\\\"$ecabu\\\"\\n\" if /^ECABU=/" $dest

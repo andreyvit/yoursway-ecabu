@@ -1,0 +1,3 @@
+#! /bin/bash
+ECABU="ecabu.rb"
+ruby $ECABU "$@"
