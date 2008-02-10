@@ -72,6 +72,8 @@ end
 
 class SourceFolderSource < Source
   
+  attr_accessor :qualifier
+  
   def initialize(path)
     super()
     @path = path
@@ -196,6 +198,7 @@ class Options
     options = self.new
     include_following = false
     binary_operation = :nop
+    last_qualifier = nil
 
     opts = OptionParser.new do |opts|
       opts.banner = "Usage: ecabu.rb [options]"
@@ -214,6 +217,7 @@ class Options
       opts.on("-S", "--source FOLDER",
               "Add a source plugins FOLDER to the sources") do |folder|
         s = SourceFolderSource.new(folder)
+        s.qualifier = last_qualifier unless last_qualifier.nil?
         options.sources << s
         options.rules << SourceRule.new(s) if include_following
       end
@@ -249,11 +253,19 @@ class Options
         options.output_folder = folder
       end
 
+      opts.separator ""
+      opts.separator "Options that take effect on the subsequent sources:"
+
       binops = [:nop, :copy]
       opts.on("--binary-op OPERATION", binops,
-              "Operation to perform on the binary plugins found in the following sources",
+              "Operation to perform on the binary plugins",
               "  (one of #{binops.join(', ')})") do |v|
         binary_operation = v
+      end
+
+      opts.on("-Q", "--qualifier QUALIFIER",
+              "Substitute '.qualifier' in source bundle versions with QUALIFIER") do |qualifier|
+        last_qualifier = qualifier
       end
 
       opts.separator ""
@@ -419,7 +431,7 @@ class Bundle
   
   attr_reader :name, :source
   # available after parsing
-  attr_reader :required_bundles, :fragment_host
+  attr_reader :required_bundles, :fragment_host, :version, :qualified_version
   # available after build
   attr_reader :exported_classpath
   
@@ -463,6 +475,7 @@ protected
     @reexported_requires = []
     @bundle_classpath = []
     @extensible_api = false
+    @version = ''
     if file_obj.file?(manifest_mf)
       data = file_obj.open(manifest_mf, "r") { |f| f.read }
       mf = Manifest.parse(data, path_prefix_for_errors + MANIFEST_PATH)
@@ -476,7 +489,9 @@ protected
       end
       @extensible_api = true if mf.value('Eclipse-ExtensibleAPI', 'false') == 'true'
       @fragment_host = mf.value('Fragment-Host', nil)
+      @version = mf.value('Bundle-Version', '')
     end
+    @qualified_version = @version # subclasses can overwrite that field
   end
   
   def resolve_bundle_classpath(rootdir, classdir = nil)
@@ -596,13 +611,16 @@ class DirectorySourceBundle < Bundle
   
   def parse(lookup)
     self.do_parse(File, @path, "#{@path}/", lookup)
+    @qualified_version = @version.gsub('qualifier', @source.qualifier) unless @source.qualifier.nil?
   end
   
   def perform_build(build_state)
     puts "Building #{self.name}."
-    outpath = File.join(build_state.output_folder, self.name)
+    qualified_name = "#{@name}_#{@qualified_version}"
+    outpath = File.join(build_state.output_folder, qualified_name)
     FileUtils.mkdir_p(outpath)
     
+    # parse build.properties
     build_props = File.join(@path, BUILD_PROPS)
     unless File.file?(build_props)
       puts "#{@path}: no #{BUILD_PROPS} found, don't know what to build."
@@ -611,6 +629,7 @@ class DirectorySourceBundle < Bundle
     data = File.open(build_props, "r") { |f| f.read }
     props = JavaProperties.parse(data, build_props)
     
+    # compile the sources
     src_folders = []
     props.each { |k, v| src_folders += v.split(',').collect { |s| s.strip }.select { |s| s.length > 0 } if k =~ /^source\./ }
     classes_dir = nil
@@ -638,6 +657,7 @@ class DirectorySourceBundle < Bundle
       classes_dir = outpath if src_folders.size > 0
     end
 
+    # copy additional files from bin.includes
     bin_includes = (props['bin.includes'] || '').split(',').collect { |s| s.strip }.select { |s| s.length > 0 }
     bin_includes.each do |bi|
       next if bi == '.' # don't know what it means, but used by DLTK and obviously should be ignored
@@ -652,8 +672,19 @@ class DirectorySourceBundle < Bundle
       FileUtils.cp_r(src, dst)
     end
     
+    # patch version qualifier in MANIFEST.MF
+    unless @qualified_version == @version
+      fn = File.join(outpath, MANIFEST_PATH)
+      if File.file?(fn)
+        data = File.open(fn, 'rb') { |f| f.read }
+        data.gsub!(/^(\s*Bundle-Version\s*:\s*)#{@version}/) { "#{$1}#{@qualified_version}" }
+        File.open(fn, 'wb') { |f| f.write(data) }
+      end
+    end
+    
+    # jar
     if can_be_jarred?
-      @jar_name = File.join(build_state.output_folder, self.name + ".jar")
+      @jar_name = File.join(build_state.output_folder, qualified_name + ".jar")
       puts "Compressing into #{File.basename(@jar_name)}"
       Zip::ZipOutputStream.open(@jar_name) do |zip|
         outpn = Pathname.new(outpath)
@@ -674,6 +705,7 @@ class DirectorySourceBundle < Bundle
     else
       @exported_classpath += resolve_bundle_classpath(outpath, classes_dir)
     end
+    
     self.post_build
   end
   
