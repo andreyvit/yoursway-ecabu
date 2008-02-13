@@ -669,6 +669,7 @@ class DirectorySourceBundle < Bundle
       end
       src = File.join(src, '.') if File.directory?(src)
       dst = File.join(outpath, bi)
+      FileUtils.mkdir_p(File.dirname(dst))
       FileUtils.cp_r(src, dst)
     end
     
