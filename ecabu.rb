@@ -583,23 +583,32 @@ class FileBundle < Bundle
 end
 
 def javac(*args)
-  puts "Running javac..."
-  
   f = Tempfile.new('javacargs')
   args.each { |a| f.puts "\"#{a}\"" }
   f.close
   
-  pid = Process.fork do
-    exec('javac', '@' + f.path)
-    Process.exit!(255)
+  begin
+    puts "Running javac..."
+    pid = Process.fork do
+      exec('javac', '@' + f.path)
+      Process.exit!(255)
+    end
+    pid, status = Process.wait2(pid)
+    FileUtils.cp(f.path, '/tmp/javacargs')
+    f.unlink
+    if status.exitstatus != 0
+      puts "Compilation failed! See /tmp/javacargs"
+      exit
+    end  
+  rescue NotImplementedError
+    puts "Running javac via system..."
+    rv = system('javac', '@' + f.path)
+    f.unlink
+    unless rb
+      puts "Compilation failed! See /tmp/javacargs"
+      exit
+    end
   end
-  pid, status = Process.wait2(pid)
-  FileUtils.cp(f.path, '/tmp/javacargs')
-  f.unlink
-  if status.exitstatus != 0
-    puts "Compilation failed! See /tmp/javacargs"
-    exit
-  end  
 end
 
 class DirectorySourceBundle < Bundle
