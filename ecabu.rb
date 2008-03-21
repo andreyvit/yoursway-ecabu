@@ -645,13 +645,21 @@ class DirectorySourceBundle < Bundle
     unless src_folders.empty?
       sources = []
       src_folders.each do |src_folder|
-        Find.find(File.join(@path, src_folder)) do |path|
+        base_path = File.join(@path, src_folder)
+        Find.find(File.join(base_path)) do |path|
           if FileTest.directory?(path)
             if File.basename(path)[0] == ?.
               Find.prune
             end
           elsif path =~ /\.java$/
             sources << path
+          else
+            puts "Resource: #{path}"
+            rel = path[base_path.size..-1]
+            rel = rel[1..-1] if rel[0] == ?/
+            out = File.join(outpath, rel)
+            FileUtils.mkdir_p(File.dirname(out))
+            FileUtils.cp_r(path, out)
           end
         end
       end
