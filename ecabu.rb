@@ -669,7 +669,7 @@ class DirectorySourceBundle < Bundle
       class_path += resolve_bundle_classpath(@path, nil)
       
       Dir.chdir(@path)
-      javac('-nowarn', '-d', outpath, '-cp', class_path.join(':'), *sources)
+      javac('-nowarn', '-d', outpath, '-cp', class_path.join(':'), *sources) unless sources.empty?
       
       classes_dir = outpath if src_folders.size > 0
     end
