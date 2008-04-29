@@ -18,6 +18,9 @@ BUILD_PROPS='build.properties'
 
 ECABU_VERSION="1"
 
+$realstdout = $stdout
+$stdout = $stderr
+
 class Source
   
   attr_reader :bundles
@@ -180,18 +183,64 @@ class IncludeOnlyPatternRule < Rule
   
 end
 
+class Command
+end
+
+class BuildCommand < Command
+  
+  def execute(builder)
+    plan = builder.create_plan
+    puts "Build plan contains #{plan.size} items."
+    builder.perform_build(plan)
+
+    puts "Done."
+  end
+  
+end
+
+class ListDependenciesCommand < Command
+  
+  attr_reader :plugin_id
+  
+  def initialize(plugin_id)
+    @plugin_id = plugin_id
+  end
+  
+  def execute(builder)
+    bundle = builder.lookup.find(plugin_id)
+    if bundle.nil?
+      puts "Cannot find #{plugin_id}"
+      exit
+    end
+    
+    res = Set.new
+    print_r(bundle, res)
+    res.each { |b| $realstdout.puts b.name }
+  end
+  
+  def print_r(bundle, res)
+    res << bundle
+    (bundle.required_bundles || []).each { |b| print_r(b, res) }
+  end
+  
+end
+
 class Options
   
   attr_accessor :sources
   attr_accessor :rules
   attr_accessor :debug
   attr_accessor :output_folder
+  attr_accessor :command
+  attr_accessor :allow_unresolved
   
   def initialize
     @sources = []
     @rules = []
     @debug = {}
     @output_folder = nil
+    @command = BuildCommand.new
+    @allow_unresolved = false
   end
 
   def self.parse(args)
@@ -266,6 +315,19 @@ class Options
       opts.on("-Q", "--qualifier QUALIFIER",
               "Substitute '.qualifier' in source bundle versions with QUALIFIER") do |qualifier|
         last_qualifier = qualifier
+      end
+
+      opts.separator ""
+      opts.separator "Special operations (executed instead of building):"
+
+      opts.on("--list-dependencies PLUGIN",
+              "List all plugins required by PLUGIN") do |v|
+        options.command = ListDependenciesCommand.new(v)
+      end
+
+      opts.on("--allow-unresolved",
+              "Don't stop if some bundles cannot be resolved") do |v|
+        options.allow_unresolved = true
       end
 
       opts.separator ""
@@ -492,6 +554,8 @@ protected
       @version = mf.value('Bundle-Version', '')
     end
     @qualified_version = @version # subclasses can overwrite that field
+    
+    # @required_bundles.each { |b| puts "  < #{b.name}"}
   end
   
   def resolve_bundle_classpath(rootdir, classdir = nil)
@@ -753,6 +817,10 @@ class BundleLookup
     return b
   end
   
+  def find(name)
+    @names_to_bundles[name]
+  end
+  
   def all_bundles
     @names_to_bundles.values
   end
@@ -938,7 +1006,7 @@ end
 
 builder.parse_bundles
 unres = builder.unresolved_bundles
-unless unres.size == 0
+unless options.allow_unresolved || unres.size == 0
   puts "Unresolved bundles:"
   unres.each do |name, src|
     puts " - #{name} (required by #{src.name})"
@@ -947,8 +1015,4 @@ unless unres.size == 0
   exit
 end
 
-plan = builder.create_plan
-puts "Build plan contains #{plan.size} items."
-builder.perform_build(plan)
-
-puts "Done."
+options.command.execute(builder)
