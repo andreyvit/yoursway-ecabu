@@ -18,6 +18,13 @@ BUILD_PROPS='build.properties'
 
 ECABU_VERSION="1"
 
+# exit codes
+EXIT_OK = 0
+EXIT_PLUGIN_NOT_FOUND = 1
+EXIT_COMPILATION_ERROR = 2
+EXIT_ERROR_IN_SOURCE_FILES = 3
+EXIT_INVALID_ARGUMENTS = 12
+
 $realstdout = $stdout
 $stdout = $stderr
 
@@ -210,7 +217,7 @@ class ListDependenciesCommand < Command
     bundle = builder.lookup.find(plugin_id)
     if bundle.nil?
       puts "Cannot find #{plugin_id}"
-      exit
+      exit EXIT_PLUGIN_NOT_FOUND
     end
     
     res = Set.new
@@ -607,7 +614,7 @@ class DirectoryBundle < Bundle
       bin_path = File.join(build_state.output_folder, File.basename(@path))
     else
       puts "Unrecognized build mode #{@source.binary_operation} for #{self}."
-      exit
+      exit EXIT_INVALID_ARGUMENTS
     end
     @exported_classpath += resolve_bundle_classpath(bin_path, bin_path)
     self.post_build
@@ -638,7 +645,7 @@ class FileBundle < Bundle
       bin_path = File.join(build_state.output_folder, File.basename(@path))
     else
       puts "Unrecognized build mode #{@source.binary_operation} for #{self}."
-      exit
+      exit EXIT_INVALID_ARGUMENTS
     end
     @exported_classpath << bin_path
     self.post_build
@@ -662,7 +669,7 @@ def javac(*args)
     f.unlink
     if status.exitstatus != 0
       puts "Compilation failed! See /tmp/javacargs"
-      exit
+      exit EXIT_COMPILATION_ERROR
     end  
   rescue NotImplementedError
     puts "Running javac via system..."
@@ -670,7 +677,7 @@ def javac(*args)
     f.unlink
     unless rb
       puts "Compilation failed! See /tmp/javacargs"
-      exit
+      exit EXIT_COMPILATION_ERROR
     end
   end
 end
@@ -697,7 +704,7 @@ class DirectorySourceBundle < Bundle
     build_props = File.join(@path, BUILD_PROPS)
     unless File.file?(build_props)
       puts "#{@path}: no #{BUILD_PROPS} found, don't know what to build."
-      exit
+      exit EXIT_ERROR_IN_SOURCE_FILES
     end
     data = File.open(build_props, "r") { |f| f.read }
     props = JavaProperties.parse(data, build_props)
@@ -990,7 +997,7 @@ end
 options = Options.parse(ARGV)
 if options.output_folder.nil?
   puts "No output folder specified. See --output. Stop."
-  exit
+  exit EXIT_INVALID_ARGUMENTS
 end
 
 builder = Builder.new(options)
@@ -1001,7 +1008,7 @@ builder.select_plugins
 
 if builder.selected_plugins.size == 0
   puts "No plugins selected for building. Stop."
-  exit
+  exit EXIT_INVALID_ARGUMENTS
 end
 
 builder.parse_bundles
@@ -1012,7 +1019,7 @@ unless options.allow_unresolved || unres.size == 0
     puts " - #{name} (required by #{src.name})"
   end
   puts "Stop."
-  exit
+  exit EXIT_PLUGIN_NOT_FOUND
 end
 
 options.command.execute(builder)
