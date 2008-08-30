@@ -16,7 +16,7 @@ PLUGINXML_PATH='plugin.xml'
 FRAGMENTXML_PATH='fragment.xml'
 BUILD_PROPS='build.properties'
 
-ECABU_VERSION="1"
+ECABU_VERSION="2"
 
 # exit codes
 EXIT_OK = 0
@@ -344,14 +344,11 @@ class Options
         list.each { |o| options.debug[o.intern] = true }
       end
 
-      # No argument, shows at tail.  This will print an options summary.
-      # Try it and see!
       opts.on_tail("-h", "--help", "Show this message") do
         puts opts
         exit
       end
 
-      # Another typical switch to print the version.
       opts.on_tail("--version", "Show version") do
         puts ECABU_VERSION
         exit
