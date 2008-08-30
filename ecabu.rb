@@ -30,10 +30,15 @@ $stdout = $stderr
 
 class Source
   
-  attr_reader :bundles
+  attr_reader :bundles, :output_folder
   
   def initialize
     @bundles = []
+  end
+  
+  def output_folder= folder
+    @output_folder = folder
+    FileUtils.mkdir_p @output_folder
   end
   
 protected
@@ -42,11 +47,20 @@ end
 
 class BinaryFolderSource < Source
 
-  attr_accessor :binary_operation
+  attr_accessor :copying_rules
   
   def initialize(path)
     super()
     @path = path
+    @copying_rules = []
+  end
+  
+  def should_copy?(bundle_name)
+    current_answer = false
+    @copying_rules.each do |pattern, value|
+      current_answer = value if File.fnmatch(pattern, bundle_name)
+    end
+    return current_answer
   end
   
   def to_s
@@ -82,19 +96,20 @@ end
 
 class SourceFolderSource < Source
   
-  attr_accessor :qualifier
+  attr_accessor :qualifier, :building_enabled
   
   def initialize(path)
     super()
     @path = path
+    @building_enabled = true
+  end
+  
+  def should_build?
+    @building_enabled
   end
   
   def to_s
     "source plugins folder #{@path}"
-  end
-  
-  def binary_operation
-    :nop
   end
   
   def find_bundles(requestor)
@@ -237,7 +252,6 @@ class Options
   attr_accessor :sources
   attr_accessor :rules
   attr_accessor :debug
-  attr_accessor :output_folder
   attr_accessor :command
   attr_accessor :allow_unresolved
   
@@ -245,7 +259,6 @@ class Options
     @sources = []
     @rules = []
     @debug = {}
-    @output_folder = nil
     @command = BuildCommand.new
     @allow_unresolved = false
   end
@@ -253,8 +266,11 @@ class Options
   def self.parse(args)
     options = self.new
     include_following = false
-    binary_operation = :nop
     last_qualifier = nil
+    copy_binaries = false
+    copy_overrides = []
+    building_enabled = []
+    output_folder = nil
 
     opts = OptionParser.new do |opts|
       opts.banner = "Usage: ecabu.rb [options]"
@@ -265,7 +281,12 @@ class Options
       opts.on("-B", "--binary FOLDER",
               "Add a binary plugins FOLDER to the sources") do |folder|
         s = BinaryFolderSource.new(folder)
-        s.binary_operation = binary_operation
+        if output_folder.nil?
+          puts "No output folder specified for source #{folder}. See --output. Stop."
+          exit EXIT_INVALID_ARGUMENTS
+        end
+        s.output_folder = output_folder
+        s.copying_rules = [['*', copy_binaries], *copy_overrides]
         options.sources << s
         options.rules << SourceRule.new(s) if include_following
       end
@@ -273,7 +294,13 @@ class Options
       opts.on("-S", "--source FOLDER",
               "Add a source plugins FOLDER to the sources") do |folder|
         s = SourceFolderSource.new(folder)
+        if output_folder.nil?
+          puts "No output folder specified for source #{folder}. See --output. Stop."
+          exit EXIT_INVALID_ARGUMENTS
+        end
+        s.output_folder = output_folder
         s.qualifier = last_qualifier unless last_qualifier.nil?
+        s.building_enabled = building_enabled
         options.sources << s
         options.rules << SourceRule.new(s) if include_following
       end
@@ -296,27 +323,43 @@ class Options
         options.rules << IncludeOnlyPatternRule.new(v)
       end
 
+      opts.separator ""
+      opts.separator "Options that take effect on the subsequent sources:"
+
+      opts.on("-O", "--output FOLDER",
+              "Put the built binaries into FOLDER") do |folder|
+        output_folder = folder
+      end
+
       opts.on("-I", "--[no-]include-following",
               "Include all plugins from the following sources into the build") do |v|
         include_following = v
       end
 
-      opts.separator ""
-      opts.separator "Other options:"
-
-      opts.on("-O", "--output FOLDER",
-              "Put the built binaries into FOLDER") do |folder|
-        options.output_folder = folder
+      opts.on("--enable-building", "Build all required source plugins (default)") do
+        building_enabled = true
       end
 
-      opts.separator ""
-      opts.separator "Options that take effect on the subsequent sources:"
+      opts.on("--disable-building", "Don't build any source plugins (only use them to determine other required plugins)") do
+        building_enabled = false
+      end
 
-      binops = [:nop, :copy]
-      opts.on("--binary-op OPERATION", binops,
-              "Operation to perform on the binary plugins",
-              "  (one of #{binops.join(', ')})") do |v|
-        binary_operation = v
+      opts.on("--copy-binaries", "Copy all binary plugins to the output folder") do
+        copy_binaries = true
+        copy_overrides = []
+      end
+
+      opts.on("--no-copy-binaries", "Don't copy any binary plugins to the output folder (default)") do
+        copy_binaries = false
+        copy_overrides = []
+      end
+
+      opts.on("--do-copy PATTERN", "Copy specific binary plugins to the output folder") do |v|
+        copy_overrides << [v, true]
+      end
+
+      opts.on("--dont-copy PATTERN", "Don't copy specific binary plugins to the output folder") do
+        copy_overrides << [v, false]
       end
 
       opts.on("-Q", "--qualifier QUALIFIER",
@@ -602,16 +645,12 @@ class DirectoryBundle < Bundle
   end
   
   def perform_build(build_state)
-    case @source.binary_operation
-    when :nop
-      bin_path = @path
-    when :copy
+    if @source.should_copy?(name)
       puts "Copying unpacked binary plugin #{self.name}."
-      FileUtils.cp_r(@path, build_state.output_folder)
-      bin_path = File.join(build_state.output_folder, File.basename(@path))
+      FileUtils.cp_r(@path, @source.output_folder)
+      bin_path = File.join(@source.output_folder, File.basename(@path))
     else
-      puts "Unrecognized build mode #{@source.binary_operation} for #{self}."
-      exit EXIT_INVALID_ARGUMENTS
+      bin_path = @path
     end
     @exported_classpath += resolve_bundle_classpath(bin_path, bin_path)
     self.post_build
@@ -633,16 +672,12 @@ class FileBundle < Bundle
   end
   
   def perform_build(build_state)
-    case @source.binary_operation
-    when :nop
-      bin_path = @path
-    when :copy
+    if @source.should_copy?(name)
       puts "Copying packed binary plugin #{self.name}."
-      FileUtils.cp_r(@path, build_state.output_folder)
-      bin_path = File.join(build_state.output_folder, File.basename(@path))
+      FileUtils.cp_r(@path, @source.output_folder)
+      bin_path = File.join(@source.output_folder, File.basename(@path))
     else
-      puts "Unrecognized build mode #{@source.binary_operation} for #{self}."
-      exit EXIT_INVALID_ARGUMENTS
+      bin_path = @path
     end
     @exported_classpath << bin_path
     self.post_build
@@ -692,9 +727,15 @@ class DirectorySourceBundle < Bundle
   end
   
   def perform_build(build_state)
+    unless @source.should_build?
+      puts "Skipped building of #{self.name}."
+      self.post_build
+      return
+    end
+    
     puts "Building #{self.name}."
     qualified_name = "#{@name}_#{@qualified_version}"
-    outpath = File.join(build_state.output_folder, qualified_name)
+    outpath = File.join(@source.output_folder, qualified_name)
     FileUtils.mkdir_p(outpath)
     
     # parse build.properties
@@ -770,7 +811,7 @@ class DirectorySourceBundle < Bundle
     
     # jar
     if can_be_jarred?
-      @jar_name = File.join(build_state.output_folder, qualified_name + ".jar")
+      @jar_name = File.join(@source.output_folder, qualified_name + ".jar")
       puts "Compressing into #{File.basename(@jar_name)}"
       Zip::ZipOutputStream.open(@jar_name) do |zip|
         outpn = Pathname.new(outpath)
@@ -848,11 +889,9 @@ end
 
 class BuildState
   
-  attr_reader :output_folder
   attr_reader :bundles_to_binaries
   
-  def initialize(output_folder)
-    @output_folder = output_folder
+  def initialize
     @bundles_to_binaries = {}
   end
   
@@ -964,8 +1003,7 @@ class Builder
   end
   
   def perform_build(plan)
-    build_state = BuildState.new(@options.output_folder)
-    FileUtils.mkdir_p(build_state.output_folder)
+    build_state = BuildState.new
     plan.each do |bundle|
       bundle.perform_build(build_state)
     end
@@ -992,10 +1030,6 @@ private
 end
 
 options = Options.parse(ARGV)
-if options.output_folder.nil?
-  puts "No output folder specified. See --output. Stop."
-  exit EXIT_INVALID_ARGUMENTS
-end
 
 builder = Builder.new(options)
 builder.log = $stdout
