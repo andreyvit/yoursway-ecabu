@@ -242,7 +242,7 @@ class ListDependenciesCommand < Command
   
   def print_r(bundle, res)
     res << bundle
-    (bundle.required_bundles || []).each { |b| print_r(b, res) }
+    (bundle.bundles_to_build_before_current_one || []).each { |b| print_r(b, res) }
   end
   
 end
@@ -540,7 +540,7 @@ class Bundle
   
   attr_reader :name, :source
   # available after parsing
-  attr_reader :required_bundles, :fragment_host, :version, :qualified_version
+  attr_reader :bundles_to_build_before_current_one, :fragment_host, :version, :qualified_version
   # available after build
   attr_reader :exported_classpath
   
@@ -561,10 +561,10 @@ class Bundle
   
   def contribute_to_plan(plan, lookup)
     return if plan.include?(self)
-    @required_bundles.each { |b| b.contribute_to_plan(plan, lookup) }
+    @bundles_to_build_before_current_one.each { |b| b.contribute_to_plan(plan, lookup) }
+    plan.add(self)
     @fragments = lookup.fragments(self)
     @fragments.each { |b| b.contribute_to_plan(plan, lookup) }
-    plan.add(self)
   end
   
   def can_be_jarred?
@@ -580,7 +580,8 @@ protected
     manifest_mf = File.join(path_prefix, MANIFEST_PATH)
     plugin_xml = File.join(path_prefix, PLUGINXML_PATH)
     plugin_xml = File.join(path_prefix, FRAGMENTXML_PATH)
-    @required_bundles = []
+    @bundles_to_build_before_current_one = []
+    @imported_bundles = []
     @reexported_requires = []
     @bundle_classpath = []
     @extensible_api = false
@@ -590,8 +591,15 @@ protected
       mf = Manifest.parse(data, path_prefix_for_errors + MANIFEST_PATH)
       mf.values_with_directives('Require-Bundle').each do |vd|
         b = lookup.lookup(vd.value, self)
-        @required_bundles << b unless b.nil?
-        @reexported_requires << b if vd.directives['visibility'] == 'reexport'
+        unless b.nil?
+            @bundles_to_build_before_current_one << b
+            @imported_bundles << b
+            @reexported_requires << b if vd.directives['visibility'] == 'reexport'
+        end
+      end
+      mf.values_with_directives('Fragment-Host').each do |vd|
+        b = lookup.lookup(vd.value, self)
+        @imported_bundles << b unless b.nil? 
       end
       mf.values_with_directives('Bundle-ClassPath').each do |vd|
         @bundle_classpath << vd.value
@@ -601,8 +609,6 @@ protected
       @version = mf.value('Bundle-Version', '')
     end
     @qualified_version = @version # subclasses can overwrite that field
-    
-    # @required_bundles.each { |b| puts "  < #{b.name}"}
   end
   
   def resolve_bundle_classpath(rootdir, classdir = nil)
@@ -774,7 +780,7 @@ class DirectorySourceBundle < Bundle
       end
     
       class_path = []
-      @required_bundles.each { |b| class_path += b.exported_classpath }
+      @imported_bundles.each { |b| class_path += b.exported_classpath }
       class_path += resolve_bundle_classpath(@path, nil)
       
       Dir.chdir(@path)
@@ -989,7 +995,7 @@ class Builder
   def parse_bundles
     traverse(@selected_plugins) do |bundle|
       bundle.parse(@lookup)
-      bundle.required_bundles
+      bundle.bundles_to_build_before_current_one
     end
   end
   
