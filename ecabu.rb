@@ -540,7 +540,7 @@ class Bundle
   
   attr_reader :name, :source
   # available after parsing
-  attr_reader :bundles_to_build_before_current_one, :fragment_host, :version, :qualified_version
+  attr_reader :bundles_to_build_before_current_one, :exported_packages, :fragment_host, :version, :qualified_version
   # available after build
   attr_reader :exported_classpath
   
@@ -562,13 +562,18 @@ class Bundle
   def contribute_to_plan(plan, lookup)
     return if plan.include?(self)
     @bundles_to_build_before_current_one.each { |b| b.contribute_to_plan(plan, lookup) }
-    plan.add(self)
+    swt_hack = (@name == 'org.eclipse.swt')
+    plan.add(self) unless swt_hack
     @fragments = lookup.fragments(self)
     @fragments.each { |b| b.contribute_to_plan(plan, lookup) }
+    plan.add(self) if swt_hack
   end
   
   def can_be_jarred?
     @bundle_classpath.all? { |e| e == '.' }
+  end
+  
+  def resolve_packages!(lookup)
   end
   
 protected
@@ -582,6 +587,8 @@ protected
     plugin_xml = File.join(path_prefix, FRAGMENTXML_PATH)
     @bundles_to_build_before_current_one = []
     @imported_bundles = []
+    @imported_packages = []
+    @exported_packages = []
     @reexported_requires = []
     @bundle_classpath = []
     @extensible_api = false
@@ -600,6 +607,12 @@ protected
       mf.values_with_directives('Fragment-Host').each do |vd|
         b = lookup.lookup(vd.value, self)
         @imported_bundles << b unless b.nil? 
+      end
+      mf.values_with_directives('Export-Package').each do |vd|
+        @exported_packages << vd.value
+      end
+      mf.values_with_directives('Import-Package').each do |vd|
+        @imported_packages << vd.value
       end
       mf.values_with_directives('Bundle-ClassPath').each do |vd|
         @bundle_classpath << vd.value
@@ -731,6 +744,16 @@ class DirectorySourceBundle < Bundle
     self.do_parse(File, @path, "#{@path}/", lookup)
     @qualified_version = @version.gsub('qualifier', @source.qualifier) unless @source.qualifier.nil?
   end
+
+  def resolve_packages!(lookup)
+    @imported_packages.each do |package|
+      b = lookup.lookup_package(package, self)
+      unless b.nil?
+          @bundles_to_build_before_current_one << b
+          @imported_bundles << b
+      end
+    end
+  end
   
   def perform_build(build_state)
     unless @source.should_build?
@@ -846,12 +869,14 @@ end
 
 class BundleLookup
   
-  attr_reader :unresolved
+  attr_reader :unresolved, :unresolved_packages
   
   def initialize
     @names_to_bundles = {}
     @unresolved = []
+    @unresolved_packages = []
     @fragments = {}
+    @packages = {}
   end
   
   def add_bundle(bundle)
@@ -865,6 +890,12 @@ class BundleLookup
   def lookup(name, src_bundle)
     b = @names_to_bundles[name]
     @unresolved << [name, src_bundle] if b.nil?
+    return b
+  end
+  
+  def lookup_package(name, src_bundle)
+    b = @packages[name]
+    @unresolved_packages << [name, src_bundle] if b.nil?
     return b
   end
   
@@ -888,6 +919,20 @@ class BundleLookup
       host = lookup(host, bundle)
       next if host.nil?
       (@fragments[host] ||= []) << bundle
+    end
+  end
+  
+  def index_packages!
+    all_bundles.each do |bundle|
+      next unless bundle.parsed?
+      bundle.exported_packages.each { |p| @packages[p] = bundle }
+    end
+  end
+  
+  def resolve_packages!
+    all_bundles.each do |b|
+      next unless b.parsed?
+      b.resolve_packages!(self)
     end
   end
   
@@ -997,6 +1042,8 @@ class Builder
       bundle.parse(@lookup)
       bundle.bundles_to_build_before_current_one
     end
+    @lookup.index_packages!
+    @lookup.resolve_packages!
   end
   
   def create_plan
@@ -1017,6 +1064,10 @@ class Builder
   
   def unresolved_bundles
     @lookup.unresolved
+  end
+  
+  def unresolved_packages
+    @lookup.unresolved_packages
   end
   
 private
@@ -1050,10 +1101,19 @@ end
 
 builder.parse_bundles
 unres = builder.unresolved_bundles
-unless options.allow_unresolved || unres.size == 0
-  puts "Unresolved bundles:"
-  unres.each do |name, src|
-    puts " - #{name} (required by #{src.name})"
+unresolved_packages = builder.unresolved_packages
+unless options.allow_unresolved || (unres.size == 0 && unresolved_packages.size == 0)
+  unless unres.size == 0
+    puts "Unresolved bundles:"
+    unres.each do |name, src|
+      puts " - #{name} (required by #{src.name})"
+    end
+  end
+  unless unresolved_packages.size == 0
+    puts "Unresolved packages:"
+    unresolved_packages.each do |name, src|
+      puts " - #{name} (imported by #{src.name})"
+    end
   end
   puts "Stop."
   exit EXIT_PLUGIN_NOT_FOUND
